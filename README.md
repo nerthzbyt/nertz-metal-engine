@@ -1,66 +1,121 @@
 # NertzMetalEngine (Nertzh)
 
-**An AI-powered, disciplined automated trading engine for crypto markets built on Bybit V5 API and Qwen Cloud.**
+**An AI-powered autopilot trading agent for crypto markets, built on Alibaba Cloud (Qwen Cloud) and Bybit V5 API.**
+
+Nertzh leverages **Alibaba Cloud's Qwen models** as the intelligence layer of an autonomous trading agent — combining real-time market analysis, AI-driven signal generation, and disciplined execution into a fully automated pipeline deployed on Alibaba Cloud infrastructure.
+
+---
+
+## Alibaba Cloud Integration
+
+This project is built for the **Global AI Hackathon Series with Qwen Cloud** (Track 4: Autopilot Agent). Alibaba Cloud powers the core intelligence and infrastructure of the system:
+
+### Qwen Cloud — AI Autopilot Brain
+
+| Capability | How Qwen Cloud Is Used |
+|---|---|
+| **Signal Generator Agent** | Qwen models analyze multi-factor market metrics (EGM, ILD, ROL, PIO, OGM) to generate and validate directional trading signals, acting as the agent's decision-making brain |
+| **Memory Agent** | Qwen Cloud maintains contextual memory of past trades, market conditions, and strategy performance — enabling the agent to learn and adapt over time |
+| **Backtesting Engine** | Historical market data is processed on Qwen Cloud compute to backtest strategies, refine feature weights, and validate the multi-factor signal model before live deployment |
+| **Strategy Optimization** | Qwen models assist in tuning EMA crossover parameters, TP/SL ratios, and risk thresholds based on historical performance analysis |
+
+### Alibaba Cloud Infrastructure
+
+| Service | Role |
+|---|---|
+| **Alibaba Cloud ECS** | Backend compute hosting the NertzMetalEngine, FastAPI server, and WebSocket consumer |
+| **Alibaba Cloud Model Studio** | API access to Qwen models for signal generation and agent reasoning |
+| **Alibaba Cloud OSS** | Storage for backtesting results, trade logs, and session data |
+
+### Why Alibaba Cloud?
+
+- **Low-latency AI inference**: Qwen Cloud's proximity to Asian crypto exchanges (Bybit) minimizes round-trip time for AI-driven decisions
+- **Scalable compute**: Backtesting across months of historical kline data requires burst compute that Alibaba Cloud provides on demand
+- **Integrated AI ecosystem**: Model Studio + DashScope API enables seamless integration of Qwen models into the Python asyncio pipeline without custom ML infrastructure
 
 ---
 
 ## Inspiration
 
-The financial markets are inherently noisy, and most algorithmic trading systems suffer from a critical flaw: **they are too reactive**. While AI and ML models can predict directional movements with high accuracy, transient market noise often triggers premature exits, destroying a strategy's statistical edge.
+Financial markets are inherently noisy, and most algorithmic trading systems suffer from a critical flaw: **they are too reactive**. While AI models can predict directional movements with high accuracy, transient market noise often triggers premature exits, destroying a strategy's statistical edge.
 
-NertzMetalEngine (Nertzh) was built to solve this exact problem — an automated trading engine that doesn't just predict the market, but possesses the *mathematical discipline* to let its edge play out without panicking over temporary fluctuations.
+NertzMetalEngine was built to solve this — an **autopilot agent** that doesn't just predict the market, but possesses the *mathematical discipline* to let its edge play out. Qwen Cloud serves as the agent's reasoning layer, providing AI-validated signals while the Hard Lock mechanism enforces execution discipline.
 
 ## What It Does
 
-Nertzh is a real-time, fully-automated crypto trading bot that:
+Nertzh is a real-time, fully-automated crypto trading autopilot agent that:
 
 - Streams live market data (orderbook, klines, tickers) via **Bybit V5 WebSocket API**
-- Computes a **multi-factor entry signal** combining EGM, ILD, ROL, PIO, and OGM metrics
-- Uses a **Triple EMA crossover** strategy for trend confirmation
+- Uses **Qwen Cloud AI** as the Signal Generator Agent to compute and validate multi-factor entry signals (EGM, ILD, ROL, PIO, OGM)
+- Leverages a **Memory Agent** powered by Qwen Cloud to track trade history, performance patterns, and adaptive thresholds
+- Applies a **Triple EMA crossover** strategy for trend confirmation
 - Executes trades with **dynamic TP/SL** based on real-time volatility
+- Runs a **Structural Hard Lock** state machine to prevent premature position exits
 - Exposes a **FastAPI REST API** for monitoring, configuration, and manual trade execution
-- Persists all market data and trade history in a **SQLite** database
+- Persists all market data and trade history in **SQLite** on Alibaba Cloud storage
+- Performs **backtesting on Qwen Cloud** to continuously refine strategy weights
 
-## Key Innovation: Structural Hard Lock
+## Key Innovation: Autopilot Agent Architecture
 
-The core innovation is the **Structural Hard Lock** mechanism in the execution engine:
+The autopilot agent combines three layers of intelligence:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    ALIBABA CLOUD (Qwen)                      │
+│  ┌───────────────────┐  ┌──────────────────────────────┐    │
+│  │  Signal Generator │  │        Memory Agent          │    │
+│  │    Agent (Qwen)   │  │  Trade history, performance  │    │
+│  │  AI-validated     │  │  patterns, adaptive weights  │    │
+│  │  multi-factor     │  │  stored & queried via        │    │
+│  │  signals          │  │  Qwen Cloud                  │    │
+│  └────────┬──────────┘  └──────────────┬───────────────┘    │
+│           │                            │                     │
+│  ┌────────┴────────────────────────────┴───────────────┐    │
+│  │          Backtesting Engine (Qwen Cloud Compute)     │    │
+│  │  Historical data processing, weight optimization     │    │
+│  └────────────────────────┬────────────────────────────┘    │
+└───────────────────────────┼─────────────────────────────────┘
+                            │
+┌───────────────────────────┼─────────────────────────────────┐
+│            ALIBABA CLOUD ECS (Backend)                       │
+│  ┌────────────────────────┴─────────────────────────────┐   │
+│  │              FastAPI Server (port 8081)               │   │
+│  │  /status /profit /metrics /config /trades /health     │   │
+│  └────────────────────────┬─────────────────────────────┘   │
+│                           │                                  │
+│  ┌────────────────────────┴─────────────────────────────┐   │
+│  │            NertzMetalEngine (Core Agent)              │   │
+│  │  ┌────────────┐  ┌────────────┐  ┌───────────────┐  │   │
+│  │  │  WebSocket  │  │  Strategy  │  │  Execution    │  │   │
+│  │  │  Consumer   │──│  Engine    │──│  Engine       │  │   │
+│  │  └─────┬──────┘  └────────────┘  └─────┬─────────┘  │   │
+│  │        │                               │             │   │
+│  │  ┌─────┴──────┐                  ┌─────┴─────┐      │   │
+│  │  │  Bybit V5  │                  │  Bybit V5 │      │   │
+│  │  │  WS Stream │                  │  REST API │      │   │
+│  │  └────────────┘                  └───────────┘      │   │
+│  │                                                       │   │
+│  │  ┌──────────────────────────────────────────────┐    │   │
+│  │  │         SQLite Database (trading.db)          │    │   │
+│  │  │  market_data | orderbook | trades | tickers   │    │   │
+│  │  └──────────────────────────────────────────────┘    │   │
+│  └───────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Structural Hard Lock
+
+The core execution innovation is the **Structural Hard Lock** mechanism:
 
 1. **Signal Suppression** — Once a position is opened with predefined TP and SL, the engine blocks re-evaluation of opposing entry signals
 2. **Exchange-Level Execution** — The bot relies on Bybit's native TP/SL triggers, removing local network latency from the exit equation
 3. **Timeout & Hold Bands** — A configurable cooldown acts as a secondary fail-safe, ensuring trades have time to breathe
 
-By decoupling the *signal generation engine* from the *position management engine*, the bot remains a disciplined executor rather than an overactive trader.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│                  FastAPI Server                  │
-│  /status /profit /metrics /config /trades /health│
-└──────────────────────┬──────────────────────────┘
-                       │
-┌──────────────────────┴──────────────────────────┐
-│            NertzMetalEngine (Core)               │
-│  ┌────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │  WebSocket  │  │  Strategy  │  │ Execution │  │
-│  │  Consumer   │──│  Engine    │──│  Engine   │  │
-│  └─────┬──────┘  └────────────┘  └─────┬─────┘  │
-│        │                               │        │
-│  ┌─────┴──────┐                  ┌─────┴─────┐  │
-│  │  Bybit V5  │                  │  Bybit V5 │  │
-│  │  WS Stream │                  │  REST API │  │
-│  └────────────┘                  └───────────┘  │
-│                                                  │
-│  ┌────────────────────────────────────────────┐  │
-│  │         SQLite Database (trading.db)        │  │
-│  │  market_data | orderbook | trades | tickers │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
-```
+By decoupling the *signal generation agent* (Qwen Cloud) from the *position management engine* (Hard Lock), the autopilot remains a disciplined executor rather than an overactive trader.
 
 ## Multi-Factor Signal Model
 
-The entry signal is a weighted combination of five proprietary metrics:
+The entry signal is a weighted combination of five proprietary metrics, validated by Qwen Cloud's AI analysis:
 
 | Metric | Name | Description | Weight |
 |--------|------|-------------|--------|
@@ -76,14 +131,18 @@ Combined score formula:
 combined = clip((0.2*EGM + 0.3*ILD + 0.3*ROL + 0.1*PIO + 0.1*OGM) * 10, -10, 10)
 ```
 
+Feature weights were refined through **backtesting on Qwen Cloud** using months of historical kline data from Bybit.
+
 ## How We Built It
 
 - **Python 3.11+** with `asyncio` for high-throughput concurrent processing
+- **Alibaba Cloud Qwen Models** via DashScope/Model Studio API for signal generation, memory agent, and strategy optimization
+- **Alibaba Cloud ECS** for backend deployment (engine + API server)
 - **Bybit V5 API** via `pybit` SDK for order execution and WebSocket for real-time data
 - **FastAPI** for the monitoring and control REST API (port 8081)
-- **SQLAlchemy + SQLite** for persistent market data and trade history storage
+- **SQLAlchemy + SQLite** for persistent market data and trade history storage on Alibaba Cloud
 - **NumPy** for numerical computation of trading metrics
-- **Qwen Cloud** compute infrastructure for backtesting and refining feature weights
+- **Qwen Cloud Compute** for large-scale backtesting and feature weight refinement
 
 ## Project Structure
 
@@ -93,6 +152,8 @@ combined = clip((0.2*EGM + 0.3*ILD + 0.3*ROL + 0.1*PIO + 0.1*OGM) * 10, -10, 10)
 │   ├── nertz.py        # Main engine: WebSocket consumer, trade execution, FastAPI server
 │   ├── settings.py     # Configuration management with validation
 │   └── utils.py        # Metrics calculation, TP/SL logic, trading strategies
+├── data/               # SQLite database and session data
+├── logs/               # Trade results and session logs
 ├── .env.example        # Environment variables template
 ├── requirements.txt    # Python dependencies
 ├── LICENSE             # MIT License
@@ -105,6 +166,7 @@ combined = clip((0.2*EGM + 0.3*ILD + 0.3*ROL + 0.1*PIO + 0.1*OGM) * 10, -10, 10)
 
 - Python 3.11+
 - A Bybit account with API keys ([create keys here](https://www.bybit.com/app/user/api-management))
+- An **Alibaba Cloud** account with access to Qwen Cloud / Model Studio ([sign up here](https://www.alibabacloud.com))
 
 ### Installation
 
@@ -129,7 +191,7 @@ combined = clip((0.2*EGM + 0.3*ILD + 0.3*ROL + 0.1*PIO + 0.1*OGM) * 10, -10, 10)
 4. **Configure environment**
    ```bash
    cp .env.example .env
-   # Edit .env with your Bybit API credentials
+   # Edit .env with your Bybit API credentials and Alibaba Cloud settings
    ```
 
 5. **Run the engine**
@@ -188,22 +250,37 @@ The biggest challenge was preventing the bot from being "too smart for its own g
 R:R = Expected Profit / Expected Loss >= 3.0
 ```
 
-Engineering the "Hard Lock" required redesigning the bot's state machine from the ground up — ensuring that while the *market data* stream continued to flow and log metrics for analysis, the *execution* thread was entirely blinded to new directional signals until the active trade resolved.
+Engineering the "Hard Lock" required redesigning the bot's state machine from the ground up — ensuring that while the *market data* stream continued to flow and log metrics for Qwen Cloud analysis, the *execution* thread was entirely blinded to new directional signals until the active trade resolved.
+
+Integrating Qwen Cloud's AI inference into the real-time asyncio pipeline also required careful latency management — the signal generation agent needed to respond within the kline interval window to remain actionable.
 
 ## What We Learned
 
-The most crucial lesson: **trade management (exit logic) is far more critical than entry prediction**. A ~56% directional win rate is useless if the exit logic doesn't respect the Risk/Reward ratio. A bot that cuts winners early out of "fear" (reacting to opposite micro-signals) will never be profitable long-term.
+- **Trade management (exit logic) is far more critical than entry prediction**. A ~56% directional win rate is useless if the exit logic doesn't respect the Risk/Reward ratio.
+- **AI agents need guardrails**: Qwen Cloud provides excellent signal quality, but the Hard Lock mechanism proves that even the best AI needs structural constraints to avoid overtrading.
+- **Cloud-native AI integration works**: Running Qwen models via Alibaba Cloud's infrastructure eliminated the need for local GPU resources while keeping inference latency low enough for 1-minute kline strategies.
 
 ## Built With
 
 - **Python** — Core language
+- **Alibaba Cloud Qwen Models** — AI signal generation, memory agent, and strategy optimization
+- **Alibaba Cloud ECS** — Backend deployment and compute
+- **Alibaba Cloud Model Studio / DashScope** — Qwen model API access
 - **Bybit V5 API** — Exchange integration (REST + WebSocket)
 - **FastAPI** — REST API server
 - **SQLAlchemy** — ORM for trade and market data persistence
 - **NumPy** — Numerical computation
 - **asyncio** — Asynchronous I/O
 - **WebSockets** — Real-time market data streaming
-- **Qwen Cloud** — Compute infrastructure for backtesting
+
+## Deployment on Alibaba Cloud
+
+The backend is deployed on **Alibaba Cloud ECS** instances with the following setup:
+
+- **Compute**: Alibaba Cloud ECS instance running Python 3.11+
+- **AI Services**: Qwen Cloud (Model Studio / DashScope API) for agent intelligence
+- **Storage**: Local SQLite on ECS + Alibaba Cloud OSS for logs and backtesting data
+- **Networking**: Public endpoint on port 8081 for API access, WebSocket connections to Bybit
 
 ## License
 
