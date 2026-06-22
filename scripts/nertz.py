@@ -19,6 +19,8 @@ from sqlalchemy.orm import sessionmaker, Session, declarative_base
 
 from scripts import utils
 from scripts.settings import ConfigSettings
+from scripts.qwen_agent import QwenSignalAgent
+from scripts.memory_agent import QwenMemoryAgent
 
 if sys.platform == "win32":
     try:
@@ -112,6 +114,22 @@ class Trade(Base):
     ogm = Column(Float, nullable=False, default=0.0)
     risk_reward_ratio = Column(Float, nullable=False, default=1.5)
 
+class ActivePosition(Base):
+    __tablename__ = "active_positions"
+    symbol = Column(String(10), primary_key=True, index=True)
+    timestamp = Column(DateTime, nullable=False)
+    action = Column(String, nullable=False) # "buy" or "sell"
+    entry_price = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False)
+    tp = Column(Float, nullable=False)
+    sl = Column(Float, nullable=False)
+    combined = Column(Float, nullable=False)
+    ild = Column(Float, nullable=False)
+    egm = Column(Float, nullable=False)
+    rol = Column(Float, nullable=False)
+    pio = Column(Float, nullable=False)
+    ogm = Column(Float, nullable=False)
+
 Base.metadata.create_all(bind=engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -151,6 +169,7 @@ class NertzMetalEngine:
         self.symbols = config.SYMBOL.split(",")
         self.capital = config.CAPITAL_USDT
         self.positions = {symbol: [] for symbol in self.symbols}
+        self.active_position = {symbol: None for symbol in self.symbols}
         self.iterations = 0
         self.ws = None
         self.running = True
@@ -159,6 +178,7 @@ class NertzMetalEngine:
         self.candles = {symbol: [] for symbol in self.symbols}
         self.trade_id_counter = self._load_initial_trade_id()
         self._load_positions()
+        self._load_active_positions()
         self.last_orderbook_log = 0
         self.last_trade_time = {symbol: datetime.min.replace(tzinfo=timezone.utc) for symbol in self.symbols}
         self.last_kline_time = {symbol: 0 for symbol in self.symbols}
@@ -166,6 +186,21 @@ class NertzMetalEngine:
         # Nuevo: Buffer para trades
         self.trade_buffer = {symbol: [] for symbol in self.symbols}
         self.buffer_size = 10
+
+        # Agentes de IA
+        self.qwen_agent = QwenSignalAgent()
+        self.memory_agent = QwenMemoryAgent()
+
+        # Reutilización de sesión Bybit HTTP
+        self.bybit_session = None
+        if config.BYBIT_API_KEY and config.BYBIT_API_SECRET:
+            logger.info(f"Initializing reused Bybit HTTP session (env: {config.BYBIT_ENV})")
+            self.bybit_session = HTTP(
+                testnet=False,
+                demo=(config.BYBIT_ENV == "demo"),
+                api_key=config.BYBIT_API_KEY,
+                api_secret=config.BYBIT_API_SECRET
+            )
 
     @staticmethod
     def _load_initial_trade_id () -> int:
@@ -195,6 +230,30 @@ class NertzMetalEngine:
                     "ogm": t.ogm,
                     "risk_reward_ratio": t.risk_reward_ratio
                 } for t in trades]
+
+    def _load_active_positions(self) -> None:
+        with SessionLocal() as db:
+            for symbol in self.symbols:
+                pos = db.query(ActivePosition).filter_by(symbol=symbol).first()
+                if pos:
+                    self.active_position[symbol] = {
+                        "symbol": pos.symbol,
+                        "timestamp": pos.timestamp.isoformat(),
+                        "action": pos.action,
+                        "entry_price": pos.entry_price,
+                        "quantity": pos.quantity,
+                        "tp": pos.tp,
+                        "sl": pos.sl,
+                        "combined": pos.combined,
+                        "ild": pos.ild,
+                        "egm": pos.egm,
+                        "rol": pos.rol,
+                        "pio": pos.pio,
+                        "ogm": pos.ogm
+                    }
+                    logger.info(f"💾 Posición activa cargada desde DB para {symbol}: {pos.action.upper()} @ {pos.entry_price:.2f}, TP={pos.tp:.2f}, SL={pos.sl:.2f}")
+                else:
+                    self.active_position[symbol] = None
 
     async def fetch_initial_data(self) -> None:
         async with aiohttp.ClientSession() as session:
@@ -467,24 +526,51 @@ class NertzMetalEngine:
             db.commit()
 
             logger.info(f"⚡ Ticker actualizado para {symbol}: Last={self.ticker_data[symbol]['last_price']}, USDIndex={self.ticker_data[symbol]['usd_index_price']}")
+            await self._check_active_positions(symbol, self.ticker_data[symbol]['last_price'], db)
         except Exception as e:
             logger.error(f"❌ Error en _handle_ticker para {symbol}: {e}")
 
-    @staticmethod
-    def _determine_decision(symbol: str, metrics: Dict[str, float]) -> str:
+    async def _determine_decision(self, symbol: str, metrics: Dict[str, float]) -> str:
         egm = metrics.get("egm", 0.0)
         combined = metrics.get("combined", 0.0)
         logger.info(
             f"🔍 {symbol}: EGM={egm:.4f}, Combined={combined:.4f}, Buy Threshold={config.EGM_BUY_THRESHOLD}, Sell Threshold={config.EGM_SELL_THRESHOLD}"
         )
+        
+        local_decision = "hold"
         if egm >= config.EGM_BUY_THRESHOLD or combined >= 1.0:
-            return "buy"
+            local_decision = "buy"
         elif egm <= config.EGM_SELL_THRESHOLD or combined <= -1.0:
-            return "sell"
-        return "hold"
+            local_decision = "sell"
+            
+        if local_decision == "hold":
+            return "hold"
+            
+        # Validación con Qwen Signal Agent y Memory Agent
+        try:
+            history_context = self.memory_agent.get_recent_context(symbol)
+            validation = await self.qwen_agent.validate_signal(symbol, local_decision, metrics, history_context)
+            qwen_decision = validation.get("action", "hold").lower()
+            confidence = validation.get("confidence", 0.0)
+            reason = validation.get("reason", "Sin justificación")
+            
+            if qwen_decision == local_decision:
+                logger.info(f"✅ [Qwen] Señal de {local_decision.upper()} VALIDADA con confianza {confidence:.2f} para {symbol}. Motivo: {reason}")
+                return local_decision
+            else:
+                logger.info(f"❌ [Qwen] Señal de {local_decision.upper()} RECHAZADA (Qwen sugirió {qwen_decision.upper()}) para {symbol}. Motivo: {reason}")
+                return "hold"
+        except Exception as e:
+            logger.error(f"❌ Error al validar señal con Qwen: {e}", exc_info=True)
+            return "hold"
 
     async def _execute_trade (self, symbol: str, db: Session) -> None:
         try:
+            # Bloquear nuevas órdenes si ya hay una posición activa
+            if self.active_position.get(symbol) is not None:
+                logger.debug(f"🔒 Posición activa (LOCKED) para {symbol}. Bloqueando nuevas señales.")
+                return
+
             # Forzar la generación del archivo JSON inicial
             await self._save_results (symbol, None)
 
@@ -511,7 +597,7 @@ class NertzMetalEngine:
             logger.info (
                 f"📊 Métricas calculadas para {symbol}: pio={metrics.get ('pio', 0)}, ild={metrics.get ('ild', 0)}, egm={metrics.get ('egm', 0)}, rol={metrics.get ('rol', 0)}, combined={metrics.get ('combined', 0)}")
 
-            decision = self._determine_decision (symbol, metrics)
+            decision = await self._determine_decision (symbol, metrics)
             if decision == "hold":
                 logger.debug (f"🤖 Decisión de hold para {symbol}")
                 return
@@ -550,78 +636,171 @@ class NertzMetalEngine:
                     f"❌ Fallo al colocar orden para {symbol}: {order_result.get ('message', 'Error desconocido')}")
                 return
 
-            self.trade_id_counter += 1
-            profit_loss = (tp - entry_price) * quantity if decision == "buy" else (entry_price - sl) * quantity
-            profit_loss *= (1 - config.FEE_RATE)
-
-            new_capital = self.capital + profit_loss
-            if new_capital > 1e15 or new_capital < 0:
-                logger.error (
-                    f"❌ Capital anormal ({new_capital:.2f}) para {symbol}. Reseteando a {config.CAPITAL_USDT}")
-                self.capital = config.CAPITAL_USDT
-            else:
-                self.capital = new_capital
-
-            trade: Trade = Trade (
-                trade_id=self.trade_id_counter - 1,
-                timestamp=current_time,
+            # Guardar posición abierta en SQLite (tabla active_positions)
+            active_pos = ActivePosition(
                 symbol=symbol,
+                timestamp=datetime.now(timezone.utc),
                 action=decision,
                 entry_price=entry_price,
-                exit_price=tp if decision == "buy" else sl,
                 quantity=quantity,
-                profit_loss=profit_loss,
-                decision=decision,
-                combined=metrics.get ("combined", 0.0),
-                ild=metrics.get ("ild", 0.0),
-                egm=metrics.get ("egm", 0.0),
-                rol=metrics.get ("rol", 0.0),
-                pio=metrics.get ("pio", 0.0),
-                ogm=metrics.get ("ogm", 0.0),
-                risk_reward_ratio=config.TP_PERCENTAGE / config.SL_PERCENTAGE
+                tp=tp,
+                sl=sl,
+                combined=metrics.get("combined", 0.0),
+                ild=metrics.get("ild", 0.0),
+                egm=metrics.get("egm", 0.0),
+                rol=metrics.get("rol", 0.0),
+                pio=metrics.get("pio", 0.0),
+                ogm=metrics.get("ogm", 0.0)
             )
-            db.add (trade)
-            db.commit ()
+            db.add(active_pos)
+            db.commit()
 
-            trade_dict = {
-                "trade_id": trade.trade_id,
-                "timestamp": trade.timestamp.isoformat (),
-                "symbol": trade.symbol,
-                "action": trade.action,
-                "entry_price": trade.entry_price,
-                "exit_price": trade.exit_price,
-                "quantity": trade.quantity,
-                "profit_loss": trade.profit_loss,
-                "decision": trade.decision,
-                "combined": trade.combined,
-                "ild": trade.ild,
-                "egm": trade.egm,
-                "rol": trade.rol,
-                "pio": trade.pio,
-                "ogm": trade.ogm,
-                "risk_reward_ratio": trade.risk_reward_ratio
+            self.active_position[symbol] = {
+                "symbol": symbol,
+                "timestamp": active_pos.timestamp.isoformat(),
+                "action": decision,
+                "entry_price": entry_price,
+                "quantity": quantity,
+                "tp": tp,
+                "sl": sl,
+                "combined": active_pos.combined,
+                "ild": active_pos.ild,
+                "egm": active_pos.egm,
+                "rol": active_pos.rol,
+                "pio": active_pos.pio,
+                "ogm": active_pos.ogm
             }
 
-            self.positions.setdefault (symbol, []).append (trade_dict)
-            self.trade_buffer [symbol].append (trade_dict)
-            self.last_trade_time [symbol] = current_time
-
-            logger.info (
-                f"💰 Orden colocada: {decision.upper ()} {quantity:.6f} {symbol} @ {entry_price:.2f}, TP={tp:.2f}, SL={sl:.2f}, P&L: {profit_loss:.2f}, Capital: {self.capital:.2f}")
+            logger.info(f"🔒 Posición abierta (LOCKED) para {symbol}: {decision.upper()} @ {entry_price:.2f}, TP={tp:.2f}, SL={sl:.2f}, Qty={quantity:.6f}")
 
             self.iterations += 1
             if config.MAX_ITERATIONS > 0 and self.iterations >= config.MAX_ITERATIONS:
                 logger.info ("🏁 Máximo de iteraciones alcanzado. Deteniendo bot.")
                 self.stop ()
-
-            # Guardar resultados si el buffer está lleno
-            if sum (len (trades) for trades in self.trade_buffer.values ()) >= self.buffer_size:
-                try:
-                    await self._save_results (symbol, trade)
-                except Exception as e:
-                    logger.error (f"❌ Error al guardar resultados para {symbol}: {e}")
         except Exception as e:
             logger.error (f"❌ Error en _execute_trade para {symbol}: {e}")
+
+    async def _check_active_positions(self, symbol: str, current_price: float, db: Session) -> None:
+        pos = self.active_position.get(symbol)
+        if pos is None:
+            return
+
+        action = pos["action"]
+        tp = pos["tp"]
+        sl = pos["sl"]
+        entry_price = pos["entry_price"]
+        qty = pos["quantity"]
+
+        tp_hit = False
+        sl_hit = False
+
+        if action == "buy":
+            if current_price >= tp:
+                tp_hit = True
+            elif current_price <= sl:
+                sl_hit = True
+        elif action == "sell":
+            if current_price <= tp:
+                tp_hit = True
+            elif current_price >= sl:
+                sl_hit = True
+
+        if not (tp_hit or sl_hit):
+            return
+
+        exit_reason = "TP hit" if tp_hit else "SL hit"
+        exit_price = current_price
+        exit_action = "sell" if action == "buy" else "buy"
+
+        logger.info(f"⚡ Posición para {symbol} activa cruza límites: {exit_reason} (Precio: {current_price:.2f}, TP={tp:.2f}, SL={sl:.2f})")
+
+        # Colocar orden de salida
+        order_result = await self._place_order(symbol, exit_action, qty, exit_price, 0.0, 0.0)
+        if not order_result.get("success", False):
+            logger.error(f"❌ Fallo al colocar orden de salida para {symbol}: {order_result.get('message', 'Error desconocido')}")
+            return
+
+        # Calcular P&L realizado real (neto de comisiones)
+        if action == "buy":
+            gross_pnl = (exit_price - entry_price) * qty
+        else:
+            gross_pnl = (entry_price - exit_price) * qty
+
+        # Comisiones (entrada + salida)
+        entry_fee = entry_price * qty * config.FEE_RATE
+        exit_fee = exit_price * qty * config.FEE_RATE
+        total_fee = entry_fee + exit_fee
+        net_realized_pnl = gross_pnl - total_fee
+
+        # Actualizar capital
+        new_capital = self.capital + net_realized_pnl
+        if new_capital > 1e15 or new_capital < 0:
+            logger.error(f"❌ Capital anormal ({new_capital:.2f}) para {symbol} tras cierre de posición. Reseteando a {config.CAPITAL_USDT}")
+            self.capital = config.CAPITAL_USDT
+        else:
+            self.capital = new_capital
+
+        # Guardar en base de datos de trades
+        self.trade_id_counter += 1
+        denominator = abs(entry_price - sl)
+        r_r_ratio = abs(tp - entry_price) / denominator if denominator > 0 else 1.5
+
+        trade = Trade(
+            trade_id=self.trade_id_counter - 1,
+            timestamp=datetime.now(timezone.utc),
+            symbol=symbol,
+            action=action,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            quantity=qty,
+            profit_loss=net_realized_pnl,
+            decision=action,
+            combined=pos["combined"],
+            ild=pos["ild"],
+            egm=pos["egm"],
+            rol=pos["rol"],
+            pio=pos["pio"],
+            ogm=pos["ogm"],
+            risk_reward_ratio=r_r_ratio
+        )
+        db.add(trade)
+        db.commit()
+
+        trade_dict = {
+            "trade_id": trade.trade_id,
+            "timestamp": trade.timestamp.isoformat(),
+            "symbol": trade.symbol,
+            "action": trade.action,
+            "entry_price": trade.entry_price,
+            "exit_price": trade.exit_price,
+            "quantity": trade.quantity,
+            "profit_loss": trade.profit_loss,
+            "decision": trade.decision,
+            "combined": trade.combined,
+            "ild": trade.ild,
+            "egm": trade.egm,
+            "rol": trade.rol,
+            "pio": trade.pio,
+            "ogm": trade.ogm,
+            "risk_reward_ratio": trade.risk_reward_ratio
+        }
+
+        self.positions.setdefault(symbol, []).append(trade_dict)
+        self.trade_buffer[symbol].append(trade_dict)
+        self.last_trade_time[symbol] = datetime.now(timezone.utc)
+        self.active_position[symbol] = None
+
+        # Eliminar de active_positions en SQLite
+        db.query(ActivePosition).filter_by(symbol=symbol).delete()
+        db.commit()
+
+        logger.info(f"💰 Posición CERRADA para {symbol} por {exit_reason} @ {exit_price:.2f}. P&L realizado (neto): {net_realized_pnl:.2f} USDT, Capital: {self.capital:.2f} USDT")
+
+        # Guardar resultados
+        try:
+            await self._save_results(symbol, trade)
+        except Exception as e:
+            logger.error(f"❌ Error al guardar resultados tras cierre de posición para {symbol}: {e}")
 
     async def _execute_trade_on_ticker (self, symbol: str, db: Session) -> None:
         current_time = int (time.time () * 1000)
@@ -648,7 +827,6 @@ class NertzMetalEngine:
         """
         max_retries = 3
         max_delay = 8  # Máximo de 8 segundos de retraso entre reintentos
-        session = None
 
         # Validaciones básicas
         if not symbol or not isinstance (symbol, str):
@@ -672,13 +850,16 @@ class NertzMetalEngine:
                     logger.warning (f"⚠️ Sin API keys, simulando orden: {action.upper ()} {quantity:.6f} {symbol}")
                     return {"success": True, "order_id": f"sim-{self.trade_id_counter}", "message": "Orden simulada"}
 
-                # Actualizar para usar BYBIT_ENV en lugar de USE_TESTNET
-                session = HTTP (
-                    testnet=False,  # Eliminamos testnet completamente como requiere la especificación
-                    api_key=config.BYBIT_API_KEY,
-                    api_secret=config.BYBIT_API_SECRET
-                )
+                # Reutilizar sesión a nivel de clase
+                if not self.bybit_session:
+                    self.bybit_session = HTTP(
+                        testnet=False,
+                        demo=(config.BYBIT_ENV == "demo"),
+                        api_key=config.BYBIT_API_KEY,
+                        api_secret=config.BYBIT_API_SECRET
+                    )
 
+                session = self.bybit_session
                 side = "Buy" if action.lower () == "buy" else "Sell"
                 order_type = config.ORDER_TYPE
                 time_in_force = config.TIME_IN_FORCE
@@ -746,20 +927,18 @@ class NertzMetalEngine:
                     await asyncio.sleep (delay)
                 else:
                     return {"success": False, "order_id": None, "message": error_msg}
-            finally:
-                # Limpiar la sesión para evitar fugas de recursos
-                if session:
-                    session = None
 
         return {"success": False, "order_id": None, "message": "Máximo de reintentos alcanzado"}
 
     def reset_trades(self) -> None:
         self.positions = {symbol: [] for symbol in self.symbols}
-        self.trade_id_counter = self._load_initial_trade_id()
+        self.active_position = {symbol: None for symbol in self.symbols}
+        self.trade_id_counter = 1
         with SessionLocal() as db:
             db.query(Trade).delete()
+            db.query(ActivePosition).delete()
             db.commit()
-        logger.info("🧹 Trades reseteados")
+        logger.info("🧹 Trades y posiciones activas reseteados")
 
     async def _save_results(self, symbol: Optional[str], trade_result: Optional[Trade] = None) -> None:
         try:
@@ -1059,9 +1238,10 @@ async def health_check() -> Dict[str, str]:
 
 server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=8081))
 
-async def main():
+async def main(reset: bool = False):
     try:
-        bot.reset_trades()
+        if reset:
+            bot.reset_trades()
         logger.info("🚀 Iniciando bot y servidor API...")
         await asyncio.gather(bot.start_async(), server.serve())
     except Exception as e:
@@ -1073,4 +1253,8 @@ async def main():
         bot.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import argparse
+    parser = argparse.ArgumentParser(description="Nertz Trading Engine")
+    parser.add_argument("--reset", action="store_true", help="Reset all trades in DB and logs on startup")
+    args = parser.parse_args()
+    asyncio.run(main(reset=args.reset))

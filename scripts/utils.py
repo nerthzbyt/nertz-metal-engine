@@ -51,8 +51,8 @@ def calculate_metrics(candle_data: List[Dict[str, float]], orderbook_data: Dict[
 
         pio = 0.0
         if len(volumes) >= 2:
-            avg_volume = float(np.mean(volumes[1:]))
-            pio = np.clip((volumes[0] - avg_volume) / (avg_volume + 1e-6), -1.0, 1.0)
+            avg_volume = float(np.mean(volumes[:-1]))
+            pio = np.clip((volumes[-1] - avg_volume) / (avg_volume + 1e-6), -1.0, 1.0)
 
         best_bid = float(bids[0][0]) if bids else last_price
         best_ask = float(asks[0][0]) if asks else last_price
