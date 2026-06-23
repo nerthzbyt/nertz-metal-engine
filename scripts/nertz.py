@@ -346,6 +346,7 @@ class NertzMetalEngine:
                 orderbook=ob or {"bids": [], "asks": []},
                 ticker=tk or {"last_price": 0},
                 recent_trades=getattr(self, 'trade_buffer', {}).get(symbol, [])[-10:],
+                symbol=symbol,
                 thresholds={
                     "egm_buy_threshold": config.EGM_BUY_THRESHOLD,
                     "egm_sell_threshold": config.EGM_SELL_THRESHOLD,
@@ -668,8 +669,13 @@ class NertzMetalEngine:
 
         local_decision = "hold"
 
-        # Use the richest combined available (from TSM-validated variations when enabled)
-        best_combined = metrics.get("spot_pressure_fusion") or metrics.get("combined_tsm_inspired") or combined
+        # Prefer TSM pipeline outputs (QuestDB/Postgres-validated formulas)
+        best_combined = (
+            metrics.get("spot_pressure_fusion")
+            or metrics.get("combined_tsm")
+            or metrics.get("combined_tsm_inspired")
+            or combined
+        )
 
         if egm >= Config.THRESHOLDS.egm_buy or best_combined >= Config.THRESHOLDS.combined_buy:
             local_decision = "buy"
@@ -745,8 +751,13 @@ class NertzMetalEngine:
         tk = self.ticker_data.get(symbol, {"last_price": 0.0})
 
         # Use the new high-quality formulas module
-        rich_metrics = calculate_metrics(cd, ob, tk, return_variations=True)
-        logger.info(f"📊 {symbol} metrics: { {k: round(v,4) for k,v in rich_metrics.items() if not k.startswith('var') and not k.startswith('recent')} }")
+        rich_metrics = calculate_metrics(
+            cd, ob, tk,
+            return_variations=True,
+            symbol=symbol,
+            recent_trades=getattr(self, "trade_buffer", {}).get(symbol, [])[-20:],
+        )
+        logger.info(f"📊 {symbol} metrics: { {k: round(v,4) for k,v in rich_metrics.items() if isinstance(v, (int, float)) and not k.startswith('var')} }")
 
         self._record_metrics_snapshot(symbol, "evaluating", cd, ob, tk)
 
@@ -792,7 +803,12 @@ class NertzMetalEngine:
             return
 
         # Capture rich decision snapshot (like professional results)
-        rich_metrics = calculate_metrics(cd, ob, tk, return_variations=True)
+        rich_metrics = calculate_metrics(
+            cd, ob, tk,
+            return_variations=True,
+            symbol=symbol,
+            recent_trades=getattr(self, "trade_buffer", {}).get(symbol, [])[-20:],
+        )
         decision_snapshot = {
             "type": "metrics",
             "symbol": symbol,
@@ -1160,7 +1176,13 @@ def _get_live_metrics(symbol: str) -> Dict[str, float]:
     ]
     orderbook = bot.orderbook_data.get(symbol, {"bids": [], "asks": []})
     ticker = bot.ticker_data.get(symbol, {"last_price": 0.0})
-    return calculate_metrics(candle_data, orderbook, ticker)
+    return calculate_metrics(
+        candle_data,
+        orderbook,
+        ticker,
+        return_variations=True,
+        symbol=symbol,
+    )
 
 
 @app.get("/settings")
@@ -1210,7 +1232,13 @@ def get_metrics(symbol: str, db: Session = Depends(get_db)) -> Dict[str, Union[s
     candle_data = [_candle_row_to_dict(r) for r in rows]
     orderbook = bot.orderbook_data.get(symbol, {"bids": [], "asks": []})
     ticker = bot.ticker_data.get(symbol, {"last_price": 0.0})
-    metrics = calculate_metrics(candle_data, orderbook, ticker)
+    metrics = calculate_metrics(
+        candle_data,
+        orderbook,
+        ticker,
+        return_variations=True,
+        symbol=symbol,
+    )
     return {
         "symbol": symbol,
         "metrics": metrics,

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -279,6 +279,10 @@ def calculate_metrics(
     ticker_data: Dict[str, Any],
     depth: int | None = None,
     return_variations: bool = False,
+    *,
+    symbol: str = "BTCUSDT",
+    recent_trades: Optional[List[Dict]] = None,
+    use_tsm: bool = True,
 ) -> Dict[str, float] | Dict[str, Any]:
     """Main entry point.
 
@@ -307,6 +311,21 @@ def calculate_metrics(
         metrics["combined_flow_heavy"] = compute_combined(metrics, variation="flow_heavy")
         metrics["spot_pressure_fusion"] = compute_spot_pressure_fusion(metrics)
         metrics["variations"] = list(Config.COMBINED_VARIATIONS.keys())
+
+    if use_tsm:
+        try:
+            from .tsm_bridge import enrich_metrics
+
+            metrics = enrich_metrics(
+                candle_data,
+                orderbook_data,
+                ticker_data,
+                base_metrics=metrics,
+                symbol=symbol,
+                recent_trades=recent_trades,
+            )
+        except Exception:
+            pass
 
     # Professional snapshot fields (matching high-quality Bybit logs)
     if bids := orderbook_data.get("bids"):
@@ -341,6 +360,9 @@ def build_rich_metrics_snapshot(
     ticker: Dict[str, Any],
     recent_trades: Optional[List[Dict]] = None,
     thresholds: Optional[Dict[str, float]] = None,
+    *,
+    symbol: str = "BTCUSDT",
+    use_tsm: bool = True,
 ) -> Dict[str, Any]:
     """Build the full rich metrics dict matching professional Bybit bot logs.
 
@@ -349,7 +371,16 @@ def build_rich_metrics_snapshot(
     if not candles or len(candles) < 1:
         return {"combined": 0.0}
 
-    core = calculate_metrics(candles, orderbook, ticker, depth=50, return_variations=True)
+    core = calculate_metrics(
+        candles,
+        orderbook,
+        ticker,
+        depth=50,
+        return_variations=True,
+        symbol=symbol,
+        recent_trades=recent_trades,
+        use_tsm=use_tsm,
+    )
 
     last_price = _safe_float(ticker.get("last_price"))
     bids = orderbook.get("bids", []) or []
