@@ -54,104 +54,25 @@ def calculate_metrics(
     orderbook_data: Dict[str, List[List[str]]],
     ticker_data: Dict[str, float],
     depth: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, float]:
-    """
-    Calcula métricas de señal usando parámetros configurables.
-    Sin hardcodeos — todo viene de ConfigSettings.
-    """
-    cfg = _cfg()
-
-    if depth is None:
-        depth = getattr(cfg, "ORDERBOOK_DEPTH", 5)
-
-    # Elegant guard with diagnostics
-    reasons = []
-    if not candle_data or len(candle_data) < 2:
-        reasons.append("insufficient candles")
-    if not orderbook_data.get("bids") or not orderbook_data.get("asks"):
-        reasons.append("empty orderbook")
-    if not ticker_data or not ticker_data.get("last_price"):
-        reasons.append("missing ticker last_price")
-
-    if reasons:
-        logger.warning(f"Datos insuficientes para métricas ({', '.join(reasons)}), usando defaults")
-        return _default_metrics()
-
+    """Delegate to scripts.formulas — single metrics implementation."""
     try:
-        last_price: float = float(ticker_data["last_price"])
-        eps = cfg.EPSILON
+        from scripts.formulas import calculate_metrics as _calc
+    except ImportError:
+        from formulas import calculate_metrics as _calc
 
-        # ── Velas ──
-        closes = np.array([float(c["close"]) for c in candle_data[-5:]], dtype=np.float64)
-        highs = np.array([float(c.get("high", 0)) for c in candle_data[-5:] if c.get("high") is not None], dtype=np.float64)
-        lows = np.array([float(c.get("low", 0)) for c in candle_data[-5:] if c.get("low") is not None], dtype=np.float64)
-
-        if len(highs) == 0 or len(lows) == 0:
-            logger.warning("Datos insuficientes para calcular altos y bajos")
-            return _default_metrics()
-
-        # ── Volatilidad ──
-        avg_price = float(np.mean(closes))
-        price_range = float(max(highs.max() - lows.min(), getattr(cfg, "MIN_PRICE_RANGE_PCT", 0.01) * last_price))
-        volatility = (highs.max() - lows.min()) / (last_price + eps)
-
-        # ── Orderbook ──
-        bids = orderbook_data["bids"][:depth]
-        asks = orderbook_data["asks"][:depth]
-
-        bid_volume = sum(float(bid[1]) for bid in bids if float(bid[1]) > 0)
-        ask_volume = sum(float(ask[1]) for ask in asks if float(ask[1]) > 0)
-        total_volume = bid_volume + ask_volume + eps
-        ild = np.clip((bid_volume - ask_volume) / total_volume, -1.0, 1.0)
-
-        # ── EGM ──
-        egm = np.clip((last_price - avg_price) / (price_range + eps), -1.0, 1.0)
-
-        # ── ROL ──
-        bid_value = sum(float(bid[0]) * float(bid[1]) for bid in bids if float(bid[1]) > 0)
-        ask_value = sum(float(ask[0]) * float(ask[1]) for ask in asks if float(ask[1]) > 0)
-        total_value = bid_value + ask_value + eps
-        rol = np.clip((bid_value - ask_value) / total_value, -1.0, 1.0)
-
-        # ── PIO (Presión de volumen) ──
-        volumes = np.array([max(float(c.get("volume", 0)), eps) for c in candle_data[-5:]], dtype=np.float64)
-        pio = 0.0
-        if len(volumes) >= 2:
-            avg_volume = float(np.mean(volumes[:-1]))
-            pio = np.clip((volumes[-1] - avg_volume) / (avg_volume + eps), -1.0, 1.0)
-
-        # ── OGM ──
-        best_bid = float(bids[0][0]) if bids else last_price
-        best_ask = float(asks[0][0]) if asks else last_price
-        spread = (best_ask - best_bid) / (last_price + eps)
-        ogm = 1.0 - np.clip(spread / getattr(cfg, "SPREAD_REFERENCE", 0.02), 0.0, 1.0)
-
-        # ── Combined (pesos configurables) ──
-        w = getattr(cfg, "METRIC_WEIGHTS", {"egm": 0.20, "ild": 0.30, "rol": 0.30, "pio": 0.10, "ogm": 0.10})
-        combined = np.clip(
-            (w.get("egm", 0.2) * egm + w.get("ild", 0.3) * ild + w.get("rol", 0.3) * rol +
-             w.get("pio", 0.1) * pio + w.get("ogm", 0.1) * ogm) * getattr(cfg, "COMBINED_SCALE", 10.0),
-            -getattr(cfg, "COMBINED_CLAMP", 10.0), getattr(cfg, "COMBINED_CLAMP", 10.0),
-        )
-
-        logger.debug(
-            f"Métricas: combined={combined:.2f}, ild={ild:.4f}, egm={egm:.4f}, "
-            f"rol={rol:.4f}, pio={pio:.4f}, ogm={ogm:.4f}, volatility={volatility:.4f}"
-        )
-
-        return {
-            "combined": float(combined),
-            "ild": float(ild),
-            "egm": float(egm),
-            "rol": float(rol),
-            "pio": float(pio),
-            "ogm": float(ogm),
-            "volatility": float(volatility),
-        }
-
-    except Exception as e:
-        logger.error(f"Error en calculate_metrics: {e}", exc_info=True)
-        return _default_metrics()
+    symbol = kwargs.pop("symbol", os.getenv("SYMBOL", "BTCUSDT"))
+    return _calc(
+        candle_data,
+        orderbook_data,
+        ticker_data,
+        depth=depth,
+        symbol=symbol,
+        use_tsm=kwargs.pop("use_tsm", True),
+        return_variations=kwargs.pop("return_variations", False),
+        recent_trades=kwargs.pop("recent_trades", None),
+    )
 
 
 def _default_metrics() -> Dict[str, float]:

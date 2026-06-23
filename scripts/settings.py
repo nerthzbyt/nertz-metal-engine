@@ -36,6 +36,8 @@ class ConfigSettings:
         # ── Umbrales de estrategia ──
         "EGM_BUY_THRESHOLD": 0.5,
         "EGM_SELL_THRESHOLD": -0.5,
+        "COMBINED_BUY_THRESHOLD": 1.0,
+        "COMBINED_SELL_THRESHOLD": -1.0,
         "PIO_THRESHOLD": 0.1,
 
         # ── Cálculo de cantidad ──
@@ -107,6 +109,8 @@ class ConfigSettings:
         # ── Strategy Thresholds ──
         self.EGM_BUY_THRESHOLD = self._get_float("EGM_BUY_THRESHOLD", self.DEFAULTS["EGM_BUY_THRESHOLD"])
         self.EGM_SELL_THRESHOLD = self._get_float("EGM_SELL_THRESHOLD", self.DEFAULTS["EGM_SELL_THRESHOLD"])
+        self.COMBINED_BUY_THRESHOLD = self._get_float("COMBINED_BUY_THRESHOLD", self.DEFAULTS["COMBINED_BUY_THRESHOLD"])
+        self.COMBINED_SELL_THRESHOLD = self._get_float("COMBINED_SELL_THRESHOLD", self.DEFAULTS["COMBINED_SELL_THRESHOLD"])
         self.PIO_THRESHOLD = self._get_float("PIO_THRESHOLD", self.DEFAULTS["PIO_THRESHOLD"])
 
         # ── Nuevos parámetros: cálculo de cantidad ──

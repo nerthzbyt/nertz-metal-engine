@@ -32,8 +32,13 @@ CORE_INDICATOR_KEYS = (
 )
 
 
+def _tsm_config():
+    from .parameters import Config
+    return Config.TSM
+
+
 def is_tsm_enabled() -> bool:
-    return os.getenv("TSM_ENABLED", "true").lower() not in ("0", "false", "no")
+    return _tsm_config().enabled
 
 
 def get_tsm_path() -> str:
@@ -48,17 +53,8 @@ def ensure_tsm_path() -> str:
 
 
 def tsm_compute_params() -> Dict[str, float]:
-    """Weights validated against TSM pipeline runs with our system."""
-    return {
-        "combined_w_ild": float(os.getenv("TSM_W_ILD", "0.30")),
-        "combined_w_egm": float(os.getenv("TSM_W_EGM", "0.20")),
-        "combined_w_rol": float(os.getenv("TSM_W_ROL", "0.30")),
-        "combined_w_pio": float(os.getenv("TSM_W_PIO", "0.10")),
-        "rol_scale": float(os.getenv("TSM_ROL_SCALE", "2.8")),
-        "ogm_scale": float(os.getenv("TSM_OGM_SCALE", "1.15")),
-        "obi_levels": int(os.getenv("TSM_OBI_LEVELS", "50")),
-        "dac_levels": int(os.getenv("TSM_DAC_LEVELS", "50")),
-    }
+    """Weights from parameters.Config.TSM — single source of truth."""
+    return _tsm_config().as_compute_kwargs()
 
 
 def extract_indicator_value(node: Any) -> Optional[float]:
@@ -201,7 +197,7 @@ def build_live_snapshot(
 
 def fetch_questdb_recent_trades(symbol: str, window_s: int = 120) -> List[Dict[str, Any]]:
     """Optional: enrich live snapshot with real QuestDB market trades."""
-    if os.getenv("TSM_QUESTDB_TRADES", "true").lower() in ("0", "false", "no"):
+    if not _tsm_config().questdb_trades:
         return []
     try:
         ensure_tsm_path()
@@ -429,7 +425,6 @@ def merge_metrics(base: Dict[str, Any], tsm_flat: Dict[str, float]) -> Dict[str,
     if tsm_flat.get("spot_pressure_fusion") is not None:
         merged["spot_pressure_fusion"] = tsm_flat["spot_pressure_fusion"]
     if tsm_flat.get("combined") is not None:
-        merged["combined_tsm"] = tsm_flat["combined"]
         merged["combined"] = tsm_flat["combined"]
     if tsm_flat.get("obi") is not None:
         merged["obi"] = tsm_flat["obi"]

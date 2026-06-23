@@ -17,11 +17,14 @@ This file, together with parameters.py, replaces scattered logic with artistic, 
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger("NertzFormulas")
 
 from .parameters import (
     Config,
@@ -250,9 +253,13 @@ def _build_core_indicators() -> None:
     ))
 
     def fusion_fn(s: MarketSnapshot) -> float:
-        m = calculate_metrics([{"close": s.last_price, "volume": 1} for _ in range(5)],
-                              s.orderbook, {"last_price": s.last_price})
-        return compute_spot_pressure_fusion(m)
+        base = {
+            "ild": compute_ild(s),
+            "pio": compute_pio(s),
+            "rol": compute_rol(s),
+            "volatility": compute_volatility(s),
+        }
+        return compute_spot_pressure_fusion(base)
 
     register_indicator(IndicatorDef(
         key="spot_pressure_fusion",
@@ -267,6 +274,44 @@ def _build_core_indicators() -> None:
 
 
 _build_core_indicators()
+
+
+def resolve_trading_signal(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Single decision view — avoids mixing incompatible scales.
+
+    TSM ``combined`` uses the ±1..10 scale (threshold ~1.0).
+    ``spot_pressure_fusion`` uses ±1 (threshold ~0.4) — informational only.
+    """
+    tsm_active = bool(metrics.get("tsm_enriched"))
+    combined = float(metrics.get("combined", 0.0))
+    egm = float(metrics.get("egm", 0.0))
+    fusion = metrics.get("spot_pressure_fusion")
+
+    return {
+        "combined": combined,
+        "egm": egm,
+        "spot_pressure_fusion": float(fusion) if isinstance(fusion, (int, float)) else None,
+        "tsm_active": tsm_active,
+        "source": metrics.get("metrics_source", "simple"),
+    }
+
+
+def evaluate_local_decision(
+    metrics: Dict[str, Any],
+    *,
+    egm_buy: float,
+    egm_sell: float,
+    combined_buy: float,
+    combined_sell: float,
+) -> str:
+    """Local rule-based decision using one consistent combined scale."""
+    sig = resolve_trading_signal(metrics)
+    if sig["egm"] >= egm_buy or sig["combined"] >= combined_buy:
+        return "buy"
+    if sig["egm"] <= egm_sell or sig["combined"] <= combined_sell:
+        return "sell"
+    return "hold"
 
 
 # =============================================================================
@@ -312,7 +357,7 @@ def calculate_metrics(
         metrics["spot_pressure_fusion"] = compute_spot_pressure_fusion(metrics)
         metrics["variations"] = list(Config.COMBINED_VARIATIONS.keys())
 
-    if use_tsm:
+    if use_tsm and Config.TSM.enabled:
         try:
             from .tsm_bridge import enrich_metrics
 
@@ -324,15 +369,19 @@ def calculate_metrics(
                 symbol=symbol,
                 recent_trades=recent_trades,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("TSM enrichment skipped: %s", exc)
 
-    # Professional snapshot fields (matching high-quality Bybit logs)
-    if bids := orderbook_data.get("bids"):
-        metrics["best_bid"] = float(bids[0][0]) if bids else last_price if 'last_price' in locals() else 0
-    if asks := orderbook_data.get("asks"):
-        metrics["best_ask"] = float(asks[0][0]) if asks else metrics.get("best_bid", 0) + 0.1
-    mid = (metrics.get("best_bid", 0) + metrics.get("best_ask", 0)) / 2 or snapshot.last_price if 'snapshot' in locals() else metrics.get("best_bid", 0)
+    last_price = snap.last_price
+    bids = orderbook_data.get("bids") or []
+    asks = orderbook_data.get("asks") or []
+    if bids:
+        metrics["best_bid"] = _safe_float(bids[0][0], last_price)
+    if asks:
+        metrics["best_ask"] = _safe_float(asks[0][0], last_price + 0.1)
+    elif bids:
+        metrics["best_ask"] = metrics.get("best_bid", last_price) + 0.1
+    mid = (metrics.get("best_bid", last_price) + metrics.get("best_ask", last_price)) / 2
     metrics["mid_price"] = mid
     spread = metrics.get("best_ask", 0) - metrics.get("best_bid", 0)
     metrics["spread"] = spread

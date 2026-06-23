@@ -80,6 +80,34 @@ class Thresholds:
 
 
 @dataclass(frozen=True)
+class TsmParams:
+    """TSM Exchange pipeline — single source for weights and timeouts."""
+    enabled: bool = True
+    questdb_trades: bool = True
+    timeout_s: float = 8.0
+    w_ild: float = 0.30
+    w_egm: float = 0.20
+    w_rol: float = 0.30
+    w_pio: float = 0.10
+    rol_scale: float = 2.8
+    ogm_scale: float = 1.15
+    obi_levels: int = 50
+    dac_levels: int = 50
+
+    def as_compute_kwargs(self) -> Dict[str, Any]:
+        return {
+            "combined_w_ild": self.w_ild,
+            "combined_w_egm": self.w_egm,
+            "combined_w_rol": self.w_rol,
+            "combined_w_pio": self.w_pio,
+            "rol_scale": self.rol_scale,
+            "ogm_scale": self.ogm_scale,
+            "obi_levels": self.obi_levels,
+            "dac_levels": self.dac_levels,
+        }
+
+
+@dataclass(frozen=True)
 class MetricWeights:
     # Must sum to ~1.0
     egm: float = 0.20
@@ -182,10 +210,26 @@ class Config:
         max_trade_size=float(os.getenv("MAX_TRADE_SIZE", 100.0)),
     )
 
-    # Thresholds
+    # Thresholds (read from env — runtime API updates sync via sync_runtime_thresholds)
     THRESHOLDS = Thresholds(
         egm_buy=float(os.getenv("EGM_BUY_THRESHOLD", 0.5)),
         egm_sell=float(os.getenv("EGM_SELL_THRESHOLD", -0.5)),
+        combined_buy=float(os.getenv("COMBINED_BUY_THRESHOLD", 1.0)),
+        combined_sell=float(os.getenv("COMBINED_SELL_THRESHOLD", -1.0)),
+    )
+
+    TSM = TsmParams(
+        enabled=os.getenv("TSM_ENABLED", "true").lower() not in ("0", "false", "no"),
+        questdb_trades=os.getenv("TSM_QUESTDB_TRADES", "true").lower() not in ("0", "false", "no"),
+        timeout_s=float(os.getenv("TSM_TIMEOUT_S", "8")),
+        w_ild=float(os.getenv("TSM_W_ILD", os.getenv("WEIGHT_ILD", "0.30"))),
+        w_egm=float(os.getenv("TSM_W_EGM", os.getenv("WEIGHT_EGM", "0.20"))),
+        w_rol=float(os.getenv("TSM_W_ROL", os.getenv("WEIGHT_ROL", "0.30"))),
+        w_pio=float(os.getenv("TSM_W_PIO", os.getenv("WEIGHT_PIO", "0.10"))),
+        rol_scale=float(os.getenv("TSM_ROL_SCALE", os.getenv("ROL_SCALE", "2.8"))),
+        ogm_scale=float(os.getenv("TSM_OGM_SCALE", os.getenv("OGM_SCALE", "1.15"))),
+        obi_levels=int(os.getenv("TSM_OBI_LEVELS", "50")),
+        dac_levels=int(os.getenv("TSM_DAC_LEVELS", "50")),
     )
 
     # Metrics
@@ -238,6 +282,25 @@ class Config:
                 "For demo/public data only, you can run without keys (read-only mode)."
             )
         return key, secret
+
+    @classmethod
+    def sync_runtime_thresholds(
+        cls,
+        *,
+        egm_buy: Optional[float] = None,
+        egm_sell: Optional[float] = None,
+        combined_buy: Optional[float] = None,
+        combined_sell: Optional[float] = None,
+    ) -> None:
+        """Keep class-level thresholds aligned with live ConfigSettings mutations."""
+        current = cls.THRESHOLDS
+        cls.THRESHOLDS = Thresholds(
+            egm_buy=egm_buy if egm_buy is not None else current.egm_buy,
+            egm_sell=egm_sell if egm_sell is not None else current.egm_sell,
+            combined_buy=combined_buy if combined_buy is not None else current.combined_buy,
+            combined_sell=combined_sell if combined_sell is not None else current.combined_sell,
+            pio=current.pio,
+        )
 
     @classmethod
     def as_dict(cls) -> Dict[str, Any]:

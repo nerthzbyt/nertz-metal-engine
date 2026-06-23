@@ -27,7 +27,7 @@ try:
     # Preferred: when run as module (python -m scripts.nertz or uvicorn scripts.nertz:app)
     from . import utils
     from .parameters import Config, get_indicator
-    from .formulas import calculate_metrics, build_rich_metrics_snapshot
+    from .formulas import calculate_metrics, build_rich_metrics_snapshot, evaluate_local_decision
     from .intelligence import IntelligenceLayer
     from .settings import ConfigSettings  # kept for legacy env loading during transition
 except ImportError:
@@ -37,7 +37,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import utils
     from parameters import Config, get_indicator
-    from formulas import calculate_metrics, build_rich_metrics_snapshot
+    from formulas import calculate_metrics, build_rich_metrics_snapshot, evaluate_local_decision
     from intelligence import IntelligenceLayer
     from settings import ConfigSettings
 
@@ -56,6 +56,14 @@ config = ConfigSettings()
 
 # Inyectar configuración en utils para eliminar hardcodeos
 utils.set_config(config)
+
+# Keep parameters.Config thresholds aligned with runtime ConfigSettings
+Config.sync_runtime_thresholds(
+    egm_buy=config.EGM_BUY_THRESHOLD,
+    egm_sell=config.EGM_SELL_THRESHOLD,
+    combined_buy=config.COMBINED_BUY_THRESHOLD,
+    combined_sell=config.COMBINED_SELL_THRESHOLD,
+)
 
 # Configuración de logging
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -347,11 +355,12 @@ class NertzMetalEngine:
                 ticker=tk or {"last_price": 0},
                 recent_trades=getattr(self, 'trade_buffer', {}).get(symbol, [])[-10:],
                 symbol=symbol,
+                use_tsm=False,
                 thresholds={
                     "egm_buy_threshold": config.EGM_BUY_THRESHOLD,
                     "egm_sell_threshold": config.EGM_SELL_THRESHOLD,
-                    "combined_buy_threshold": 1.0,
-                    "combined_sell_threshold": -1.0,
+                    "combined_buy_threshold": config.COMBINED_BUY_THRESHOLD,
+                    "combined_sell_threshold": config.COMBINED_SELL_THRESHOLD,
                     "combined_hold_band": 0.0
                 }
             )
@@ -500,37 +509,44 @@ class NertzMetalEngine:
                 logger.info(f"📡 Suscrito a {symbol}")
 
     async def _on_message(self, ws: Any, message: Any) -> None:
+        if isinstance(message, bytes):
+            message = message.decode("utf-8")
+        elif isinstance(message, tuple):
+            message = message[0]
+        elif message is None:
+            logger.warning("⚠️ Mensaje recibido es None, ignorando.")
+            return
+
+        if not isinstance(message, str):
+            return
+
+        data = json.loads(message)
+        logger.debug(f"📨 Mensaje procesado: {json.dumps(data, indent=2)}")
+
+        if "topic" not in data:
+            logger.debug("⚠️ Mensaje sin tema ('topic'), posiblemente ping/pong.")
+            if data.get("op") == "ping" and ws is not None:
+                await ws.send(json.dumps({"op": "pong", "ts": data.get("ts", int(time.time() * 1000))}))
+            return
+
+        symbol = data["topic"].split(".")[-1]
+        if symbol not in self.symbols:
+            logger.warning(f"⚠️ Símbolo desconocido: {symbol}")
+            return
+
+        run_trade = False
         with db_session() as db:
-            if isinstance(message, bytes):
-                message = message.decode('utf-8')
-            elif isinstance(message, tuple):
-                message = message[0]
-            elif message is None:
-                logger.warning("⚠️ Mensaje recibido es None, ignorando.")
-                return
+            if "kline" in data["topic"] and data.get("data") and len(data["data"]) > 0:
+                await self._handle_kline(symbol, data["data"][0], db)
+            elif "orderbook" in data["topic"] and data.get("data"):
+                await self._handle_orderbook(symbol, data, db)
+            elif "tickers" in data["topic"] and data.get("data"):
+                await self._handle_ticker(symbol, data["data"], db)
+                run_trade = True
 
-            if isinstance(message, str):
-                data = json.loads(message)
-                logger.debug(f"📨 Mensaje procesado: {json.dumps(data, indent=2)}")
-
-                if "topic" not in data:
-                    logger.debug("⚠️ Mensaje sin tema ('topic'), posiblemente ping/pong.")
-                    if data.get("op") == "ping" and ws is not None:
-                        await ws.send(json.dumps({"op": "pong", "ts": data.get("ts", int(time.time() * 1000))}))
-                    return
-
-                symbol = data["topic"].split(".")[-1]
-                if symbol not in self.symbols:
-                    logger.warning(f"⚠️ Símbolo desconocido: {symbol}")
-                    return
-
-                if "kline" in data["topic"] and data.get("data") and len(data["data"]) > 0:
-                    await self._handle_kline(symbol, data["data"][0], db)
-                elif "orderbook" in data["topic"] and data.get("data"):
-                    await self._handle_orderbook(symbol, data, db)
-                elif "tickers" in data["topic"] and data.get("data"):
-                    await self._handle_ticker(symbol, data["data"], db)
-                    await self._execute_trade_on_ticker(symbol, db)
+        # Heavy work outside DB session — avoids blocking the websocket reader
+        if run_trade:
+            await self._execute_trade_on_ticker(symbol)
 
     async def _handle_kline(self, symbol: str, kline: Dict, db: Session) -> None:
         timestamp_value = kline.get("start")
@@ -568,8 +584,6 @@ class NertzMetalEngine:
             self.last_kline_time[symbol] = int(timestamp_value)
             logger.info(f"⚡ Kline para {symbol}: Close={candle.close}, Volume={candle.volume}")
             logger.info(f"📈 Acumulados {len(self.candles[symbol])} velas para {symbol}")
-
-            await self._execute_trade(symbol, db)
 
     async def _handle_orderbook(self, symbol: str, data: Dict, db: Session) -> None:
         if data.get("type") == "snapshot":
@@ -663,24 +677,49 @@ class NertzMetalEngine:
 
         await self._check_active_positions(symbol, self.ticker_data[symbol]['last_price'], db)
 
+    async def _compute_symbol_metrics(self, symbol: str) -> Dict[str, Any]:
+        """Run metrics (incl. TSM) off the event loop with timeout."""
+        candles = self.candles.get(symbol, [])
+        cd = [
+            {"open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "volume": c["volume"]}
+            for c in candles
+        ]
+        ob = self.orderbook_data.get(symbol, {"bids": [], "asks": []})
+        tk = self.ticker_data.get(symbol, {"last_price": 0.0})
+        recent = getattr(self, "trade_buffer", {}).get(symbol, [])[-20:]
+
+        loop = asyncio.get_running_loop()
+        timeout = Config.TSM.timeout_s
+
+        def _run(use_tsm: bool = True) -> Dict[str, Any]:
+            return calculate_metrics(
+                cd, ob, tk,
+                return_variations=False,
+                symbol=symbol,
+                recent_trades=recent,
+                use_tsm=use_tsm,
+            )
+
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: _run(True)),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("%s metrics timed out after %.1fs — falling back to simple formulas", symbol, timeout)
+            return await loop.run_in_executor(None, lambda: _run(False))
+        except Exception as exc:
+            logger.warning("%s metrics failed (%s) — falling back to simple formulas", symbol, exc)
+            return await loop.run_in_executor(None, lambda: _run(False))
+
     async def _determine_decision(self, symbol: str, metrics: Dict[str, float]) -> str:
-        egm = metrics.get("egm", 0.0)
-        combined = metrics.get("combined", 0.0)
-
-        local_decision = "hold"
-
-        # Prefer TSM pipeline outputs (QuestDB/Postgres-validated formulas)
-        best_combined = (
-            metrics.get("spot_pressure_fusion")
-            or metrics.get("combined_tsm")
-            or metrics.get("combined_tsm_inspired")
-            or combined
+        local_decision = evaluate_local_decision(
+            metrics,
+            egm_buy=config.EGM_BUY_THRESHOLD,
+            egm_sell=config.EGM_SELL_THRESHOLD,
+            combined_buy=config.COMBINED_BUY_THRESHOLD,
+            combined_sell=config.COMBINED_SELL_THRESHOLD,
         )
-
-        if egm >= Config.THRESHOLDS.egm_buy or best_combined >= Config.THRESHOLDS.combined_buy:
-            local_decision = "buy"
-        elif egm <= Config.THRESHOLDS.egm_sell or best_combined <= Config.THRESHOLDS.combined_sell:
-            local_decision = "sell"
 
         if local_decision == "hold":
             return "hold"
@@ -739,7 +778,7 @@ class NertzMetalEngine:
         except Exception:
             return None
 
-    async def _execute_trade(self, symbol: str, db: Session) -> None:
+    async def _execute_trade(self, symbol: str) -> None:
         if self.active_position.get(symbol) is not None:
             return
 
@@ -750,14 +789,11 @@ class NertzMetalEngine:
         ob = self.orderbook_data.get(symbol, {"bids": [], "asks": []})
         tk = self.ticker_data.get(symbol, {"last_price": 0.0})
 
-        # Use the new high-quality formulas module
-        rich_metrics = calculate_metrics(
-            cd, ob, tk,
-            return_variations=True,
-            symbol=symbol,
-            recent_trades=getattr(self, "trade_buffer", {}).get(symbol, [])[-20:],
+        rich_metrics = await self._compute_symbol_metrics(symbol)
+        logger.info(
+            f"📊 {symbol} metrics [{rich_metrics.get('metrics_source', 'simple')}]: "
+            f"{ {k: round(v, 4) for k, v in rich_metrics.items() if isinstance(v, (int, float)) and k in ('combined', 'egm', 'ild', 'rol', 'pio', 'obi', 'spot_pressure_fusion')} }"
         )
-        logger.info(f"📊 {symbol} metrics: { {k: round(v,4) for k,v in rich_metrics.items() if isinstance(v, (int, float)) and not k.startswith('var')} }")
 
         self._record_metrics_snapshot(symbol, "evaluating", cd, ob, tk)
 
@@ -802,13 +838,6 @@ class NertzMetalEngine:
             logger.error(f"❌ Fallo al colocar orden para {symbol}: {result.get('message')}")
             return
 
-        # Capture rich decision snapshot (like professional results)
-        rich_metrics = calculate_metrics(
-            cd, ob, tk,
-            return_variations=True,
-            symbol=symbol,
-            recent_trades=getattr(self, "trade_buffer", {}).get(symbol, [])[-20:],
-        )
         decision_snapshot = {
             "type": "metrics",
             "symbol": symbol,
@@ -818,8 +847,8 @@ class NertzMetalEngine:
             "thresholds": {
                 "egm_buy_threshold": config.EGM_BUY_THRESHOLD,
                 "egm_sell_threshold": config.EGM_SELL_THRESHOLD,
-                "combined_buy_threshold": 1.0,
-                "combined_sell_threshold": -1.0,
+                "combined_buy_threshold": config.COMBINED_BUY_THRESHOLD,
+                "combined_sell_threshold": config.COMBINED_SELL_THRESHOLD,
                 "combined_hold_band": 0.0
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -842,8 +871,9 @@ class NertzMetalEngine:
             ogm=float(metrics.get("ogm", 0.0)),
             order_id=str(result.get("order_id") or ""),
         )
-        db.add(active_pos)
-        db.commit()
+        with db_session() as db:
+            db.add(active_pos)
+            db.commit()
 
         self.active_position[symbol] = {
             "symbol": symbol,
@@ -971,12 +1001,12 @@ class NertzMetalEngine:
             except Exception:
                 pass
 
-    async def _execute_trade_on_ticker(self, symbol: str, db: Session) -> None:
+    async def _execute_trade_on_ticker(self, symbol: str) -> None:
         now = time.time()
         if (now * 1000 - self.last_kline_time.get(symbol, 0) > config.KLINE_STALE_MS
                 and now - self.last_ticker_trade_time.get(symbol, 0) > config.TICKER_TRADE_COOLDOWN_S):
             self.last_ticker_trade_time[symbol] = now
-            await self._execute_trade(symbol, db)
+            await self._execute_trade(symbol)
 
     async def _check_sufficient_balance(self, symbol: str, action: str, quantity: float) -> bool:
         if not self.bybit_session:
@@ -1180,8 +1210,9 @@ def _get_live_metrics(symbol: str) -> Dict[str, float]:
         candle_data,
         orderbook,
         ticker,
-        return_variations=True,
+        return_variations=False,
         symbol=symbol,
+        use_tsm=False,
     )
 
 
@@ -1236,8 +1267,9 @@ def get_metrics(symbol: str, db: Session = Depends(get_db)) -> Dict[str, Union[s
         candle_data,
         orderbook,
         ticker,
-        return_variations=True,
+        return_variations=False,
         symbol=symbol,
+        use_tsm=False,
     )
     return {
         "symbol": symbol,
@@ -1280,12 +1312,32 @@ def get_profit() -> Dict[str, Union[str, float, int, Dict[str, Dict[str, Union[s
         "by_symbol": by_symbol,
     }
 
+def _sync_runtime_thresholds() -> None:
+    Config.sync_runtime_thresholds(
+        egm_buy=config.EGM_BUY_THRESHOLD,
+        egm_sell=config.EGM_SELL_THRESHOLD,
+        combined_buy=config.COMBINED_BUY_THRESHOLD,
+        combined_sell=config.COMBINED_SELL_THRESHOLD,
+    )
+
+
 @app.post("/config/update_thresholds")
-def update_thresholds(egm_buy_threshold: float, egm_sell_threshold: float) -> Dict[str, str]:
-    """Actualiza umbrales EGM de compra/venta."""
+def update_thresholds(
+    egm_buy_threshold: float,
+    egm_sell_threshold: float,
+    combined_buy_threshold: float = 1.0,
+    combined_sell_threshold: float = -1.0,
+) -> Dict[str, str]:
+    """Actualiza umbrales de señal (EGM + combined)."""
     config.EGM_BUY_THRESHOLD = egm_buy_threshold
     config.EGM_SELL_THRESHOLD = egm_sell_threshold
-    logger.info(f"✅ Umbrales actualizados: buy={egm_buy_threshold}, sell={egm_sell_threshold}")
+    config.COMBINED_BUY_THRESHOLD = combined_buy_threshold
+    config.COMBINED_SELL_THRESHOLD = combined_sell_threshold
+    _sync_runtime_thresholds()
+    logger.info(
+        "✅ Umbrales actualizados: egm buy=%s sell=%s | combined buy=%s sell=%s",
+        egm_buy_threshold, egm_sell_threshold, combined_buy_threshold, combined_sell_threshold,
+    )
     return {"message": "Umbrales actualizados", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 @app.get("/orderbook/{symbol}")
@@ -1324,8 +1376,8 @@ def get_trades(symbol: str) -> Dict[str, Union[str, List[Dict[str, Any]]]]:
 
 
 @app.post("/execute_trade/{symbol}")
-async def execute_trade(symbol: str, db: Session = Depends(get_db)) -> Dict[str, str]:
-    await bot._execute_trade(symbol, db)
+async def execute_trade(symbol: str) -> Dict[str, str]:
+    await bot._execute_trade(symbol)
     return {"message": f"✅ Trade ejecutado para {symbol}", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
@@ -1349,6 +1401,9 @@ def get_config() -> Dict[str, Union[str, float, int, bool]]:
         "sl_percentage": config.SL_PERCENTAGE,
         "egm_buy_threshold": config.EGM_BUY_THRESHOLD,
         "egm_sell_threshold": config.EGM_SELL_THRESHOLD,
+        "combined_buy_threshold": config.COMBINED_BUY_THRESHOLD,
+        "combined_sell_threshold": config.COMBINED_SELL_THRESHOLD,
+        "tsm_enabled": Config.TSM.enabled,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1365,6 +1420,11 @@ def update_all_config(config_data: Dict[str, Union[str, float, int]]) -> Dict[st
         config.EGM_BUY_THRESHOLD = _safe_float(config_data["egm_buy_threshold"])
     if "egm_sell_threshold" in config_data:
         config.EGM_SELL_THRESHOLD = _safe_float(config_data["egm_sell_threshold"])
+    if "combined_buy_threshold" in config_data:
+        config.COMBINED_BUY_THRESHOLD = _safe_float(config_data["combined_buy_threshold"])
+    if "combined_sell_threshold" in config_data:
+        config.COMBINED_SELL_THRESHOLD = _safe_float(config_data["combined_sell_threshold"])
+    _sync_runtime_thresholds()
     logger.info(f"✅ Configuración actualizada: {config_data}")
     return {"message": "Configuración actualizada", "timestamp": datetime.now(timezone.utc).isoformat()}
 
