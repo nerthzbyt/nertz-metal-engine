@@ -1,0 +1,18 @@
+{
+  "name": "place_order",
+  "description": "Place a new order (market, limit, conditional). Use with care. Requires trading permissions and API keys.",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "symbol": { "type": "string" },
+      "side": { "type": "string", "enum": ["Buy", "Sell"] },
+      "orderType": { "type": "string", "enum": ["Market", "Limit"] },
+      "qty": { "type": "string" },
+      "price": { "type": "string" },
+      "category": { "type": "string", "default": "spot" },
+      "timeInForce": { "type": "string" }
+    },
+    "required": ["symbol", "side", "orderType", "qty"]
+  }
+}

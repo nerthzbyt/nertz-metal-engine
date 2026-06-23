@@ -370,10 +370,32 @@ This document serves as proof of Alibaba Cloud deployment for the NertzMetalEngi
 | File | Alibaba Cloud Integration |
 |------|--------------------------|
 | `scripts/nertz.py` | Main engine deployed on Alibaba Cloud ECS; FastAPI server on port 8081 |
+| `scripts/intelligence.py` | DashScope OpenAI-compatible API (`qwen-plus`) for signal validation |
+| `scripts/qwen_agent.py` | Qwen Cloud Signal Generator Agent implementation |
+| `scripts/memory_agent.py` | Trade memory context fed into Qwen prompts |
+| `monitor_agent.py` | Production observability agent polling ECS-hosted engine |
 | `scripts/utils.py` | Metric computation feeding Qwen Cloud Signal Generator Agent |
 | `scripts/settings.py` | Configuration management for cloud-deployed instance |
+| `docs/architecture-diagram.md` | Visual architecture for hackathon judges |
 | `README.md` | Architecture documentation showing Alibaba Cloud integration |
 | `docs/qwen-integration.md` | This document — full integration reference |
+
+### Runtime Verification on ECS
+
+```bash
+# 1. Start engine (bot + API)
+python -m scripts.nertz
+
+# 2. Verify Qwen + Hard Lock state
+curl http://localhost:8081/health
+curl http://localhost:8081/intelligence/status
+
+# 3. Start monitor agent (optional second agent)
+python monitor_agent.py
+curl http://localhost:8090/monitor/health
+```
+
+Record a short video showing the ECS terminal + `curl /health` with `qwen_configured: true` for the hackathon submission form.
 
 ### Repository
 

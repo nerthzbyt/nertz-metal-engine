@@ -1,0 +1,20 @@
+{
+  "name": "get_ticker",
+  "description": "Get real-time ticker information for a symbol (last price, volume, price change, etc.). Works without API key.",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "symbol": {
+        "type": "string",
+        "description": "Trading pair, e.g. BTCUSDT"
+      },
+      "category": {
+        "type": "string",
+        "description": "spot | linear | inverse",
+        "default": "spot"
+      }
+    },
+    "required": ["symbol"]
+  }
+}

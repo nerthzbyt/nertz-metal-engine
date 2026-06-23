@@ -27,6 +27,13 @@ data/
 logs/
 *.db
 *.sqlite3
+identifier.sqlite
+tsm_full_output.json
+
+# Local analysis artifacts
+analyze_backup.py
+inspect_db.py
+run_tsm_pipeline.py
 
 # OS
 .DS_Store

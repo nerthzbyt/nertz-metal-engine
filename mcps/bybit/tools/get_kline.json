@@ -1,0 +1,15 @@
+{
+  "name": "get_kline",
+  "description": "Get historical kline/candlestick data. Excellent for features and training snapshots.",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "symbol": { "type": "string" },
+      "interval": { "type": "string", "description": "1m, 5m, 15m, 1h, 4h, 1d etc." },
+      "limit": { "type": "integer", "default": 200 },
+      "category": { "type": "string", "default": "spot" }
+    },
+    "required": ["symbol", "interval"]
+  }
+}

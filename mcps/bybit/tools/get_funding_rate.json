@@ -1,0 +1,14 @@
+{
+  "name": "get_funding_rate",
+  "description": "Get current or historical funding rates. Useful for sentiment and mean-reversion features in predictions.",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "symbol": { "type": "string" },
+      "category": { "type": "string", "default": "linear" },
+      "limit": { "type": "integer", "default": 1 }
+    },
+    "required": ["symbol"]
+  }
+}

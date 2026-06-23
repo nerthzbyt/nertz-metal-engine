@@ -2,17 +2,38 @@ import os
 import json
 import logging
 import aiohttp
-from typing import Dict, Any
-
+from aiohttp import ClientTimeout
+from typing import Dict, Any, Optional
+from utils import (
+    ConfigProtocol,
+    BaseTradingStrategy,
+    _cfg,
+    _default_metrics,
+    _empty_signal,
+    calculate_metrics,
+    calculate_tp_sl,
+    evaluate_trend,
+    save_results,
+    set_config,
+    timestamp_to_datetime,
+)   
 logger = logging.getLogger("NertzQwenAgent")
 
 class QwenSignalAgent:
-    def __init__(self, api_key: str = None, model: str = "qwen-plus"):
+    def __init__(self, api_key: Optional[str] = None, model: str = "qwen-plus"):
         self.api_key = api_key or os.getenv("DASHSCOPE_API_KEY")
         self.model = model
         self.endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
-    async def validate_signal(self, symbol: str, proposed_action: str, metrics: Dict[str, float], history_context: str) -> Dict[str, Any]:
+    async def validate_signal(
+        self,
+        symbol: str,
+        proposed_action: str,
+        metrics: Dict[str, float],
+        history_context: str,
+        xgb_context: Optional[str] = None,
+        extra_analysis: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Valida una señal propuesta utilizando Qwen Cloud o un fallback simulado.
         Retorna un dict con:
@@ -26,9 +47,9 @@ class QwenSignalAgent:
         # Si no hay API key o es una de marcador de posición, usar fallback simulado
         if not self.api_key or self.api_key.startswith("your_") or len(self.api_key.strip()) == 0:
             logger.info("⚠️ DASHSCOPE_API_KEY no configurada o inválida. Usando fallback simulado para validación de Qwen.")
-            return self._fallback_validation(symbol, proposed_action, metrics, history_context)
+            return self._fallback_validation(symbol, proposed_action, metrics, history_context, xgb_context=xgb_context)
 
-        prompt = self._build_prompt(symbol, proposed_action, metrics, history_context)
+        prompt = self._build_prompt(symbol, proposed_action, metrics, history_context, xgb_context, extra_analysis)
         
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -41,14 +62,8 @@ class QwenSignalAgent:
                 {
                     "role": "system",
                     "content": (
-                        "Eres un agente de inteligencia artificial experto en validación de señales de trading cuantitativo. "
-                        "Tu tarea es validar la señal propuesta utilizando las métricas actuales del orderbook, velas y el contexto histórico de trades. "
-                        "Debes responder estrictamente en formato JSON válido, sin bloques de código markdown, con la siguiente estructura:\n"
-                        "{\n"
-                        "  \"action\": \"buy\" | \"sell\" | \"hold\",\n"
-                        "  \"confidence\": <float entre 0.0 y 1.0>,\n"
-                        "  \"reason\": \"<explicación detallada de tu decisión>\"\n"
-                        "}"
+                        "Eres un experto en trading. Valida señales usando métricas, historial, predicciones XGBoost y datos Bybit. "
+                        "Responde SOLO JSON válido: {\"action\": \"buy\"|\"sell\"|\"hold\", \"confidence\": 0-1, \"reason\": \"explicación\"}"
                     )
                 },
                 {
@@ -60,8 +75,9 @@ class QwenSignalAgent:
         }
 
         try:
+            timeout = ClientTimeout(total=10)
             async with aiohttp.ClientSession() as session:
-                async with session.post(self.endpoint, headers=headers, json=payload, timeout=10) as resp:
+                async with session.post(self.endpoint, headers=headers, json=payload, timeout=timeout) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         content = data["choices"][0]["message"]["content"].strip()
@@ -70,7 +86,7 @@ class QwenSignalAgent:
                             lines = content.splitlines()
                             if lines[0].startswith("```"):
                                 lines = lines[1:]
-                            if lines[-1].strip() == "```":
+                            if lines and lines[-1].strip() == "```":
                                 lines = lines[:-1]
                             content = "\n".join(lines).strip()
                         
@@ -84,29 +100,53 @@ class QwenSignalAgent:
                     else:
                         error_text = await resp.text()
                         logger.error(f"❌ Error en llamada a Qwen API ({resp.status}): {error_text}")
-                        return self._fallback_validation(symbol, proposed_action, metrics, history_context, reason_prefix="[API Error Fallback] ")
+                        return self._fallback_validation(symbol, proposed_action, metrics, history_context, reason_prefix="[API Error Fallback] ", xgb_context=xgb_context)
         except Exception as e:
             logger.error(f"❌ Excepción durante llamada a Qwen API: {e}", exc_info=True)
-            return self._fallback_validation(symbol, proposed_action, metrics, history_context, reason_prefix=f"[Exception Fallback: {type(e).__name__}] ")
+            return self._fallback_validation(symbol, proposed_action, metrics, history_context, reason_prefix=f"[Exception Fallback: {type(e).__name__}] ", xgb_context=xgb_context)
 
-    def _build_prompt(self, symbol: str, proposed_action: str, metrics: Dict[str, float], history_context: str) -> str:
-        return (
-            f"Par de trading: {symbol}\n"
-            f"Señal propuesta localmente: {proposed_action.upper()}\n\n"
-            f"Métricas del mercado actuales:\n"
-            f"- EGM (Elasticity Grid Metric): {metrics.get('egm', 0.0):.4f}\n"
-            f"- ILD (Imbalance Liquidity Delta): {metrics.get('ild', 0.0):.4f}\n"
-            f"- ROL (Rate of Liquidity): {metrics.get('rol', 0.0):.4f}\n"
-            f"- PIO (Price Imbalance Oscillator): {metrics.get('pio', 0.0):.4f}\n"
-            f"- OGM (Orderbook Gap Metric): {metrics.get('ogm', 0.0):.4f}\n"
-            f"- Combined Metric: {metrics.get('combined', 0.0):.4f}\n"
-            f"- Volatilidad: {metrics.get('volatility', 0.0):.4f}\n\n"
-            f"Historial y Contexto de Trades Recientes:\n"
-            f"{history_context}\n\n"
-            f"Por favor, analiza la consistencia de las métricas con la señal propuesta y decide si confirmas la señal ('buy' o 'sell') o si sugieres mantener la posición/cancelar la entrada ('hold')."
+    def _build_prompt(
+        self,
+        symbol: str,
+        proposed_action: str,
+        metrics: Dict[str, float],
+        history_context: str,
+        xgb_context: Optional[str] = None,
+        extra_analysis: Optional[str] = None,
+    ) -> str:
+        parts = [
+            f"Par de trading: {symbol}\n",
+            f"Señal propuesta localmente: {proposed_action.upper()}\n\n",
+            "Métricas del mercado actuales:\n",
+            f"- EGM: {metrics.get('egm', 0.0):.4f}\n",
+            f"- ILD: {metrics.get('ild', 0.0):.4f}\n",
+            f"- ROL: {metrics.get('rol', 0.0):.4f}\n",
+            f"- PIO: {metrics.get('pio', 0.0):.4f}\n",
+            f"- OGM: {metrics.get('ogm', 0.0):.4f}\n",
+            f"- Combined: {metrics.get('combined', 0.0):.4f}\n",
+            f"- Volatilidad: {metrics.get('volatility', 0.0):.4f}\n\n",
+        ]
+        if xgb_context:
+            parts.append(f"Predicción XGBoost (datos reales históricos):\n{xgb_context}\n\n")
+        if extra_analysis:
+            parts.append(f"Análisis adicional (Bybit data):\n{extra_analysis}\n\n")
+        parts.append("Historial y Contexto de Trades Recientes:\n")
+        parts.append(f"{history_context}\n\n")
+        parts.append(
+            "Analiza todo y responde JSON estricto: "
+            '{"action": "buy"|"sell"|"hold", "confidence": float, "reason": "detallado"}'
         )
+        return "".join(parts)
 
-    def _fallback_validation(self, symbol: str, proposed_action: str, metrics: Dict[str, float], history_context: str, reason_prefix: str = "") -> Dict[str, Any]:
+    def _fallback_validation(
+        self,
+        symbol: str,
+        proposed_action: str,
+        metrics: Dict[str, float],
+        history_context: str,
+        reason_prefix: str = "",
+        xgb_context: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Lógica de fallback que aprueba o rechaza la señal propuesta basada en heurísticas simples
         si la API de Qwen no está disponible o no se configuró la API key.

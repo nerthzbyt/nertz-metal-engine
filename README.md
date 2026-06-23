@@ -148,16 +148,27 @@ Feature weights were refined through **backtesting on Qwen Cloud** using months 
 
 ```
 ├── scripts/
-│   ├── __init__.py
-│   ├── nertz.py        # Main engine: WebSocket consumer, trade execution, FastAPI server
-│   ├── settings.py     # Configuration management with validation
-│   └── utils.py        # Metrics calculation, TP/SL logic, trading strategies
-├── data/               # SQLite database and session data
-├── logs/               # Trade results and session logs
-├── .env.example        # Environment variables template
-├── requirements.txt    # Python dependencies
-├── LICENSE             # MIT License
-└── README.md           # This file
+│   ├── nertz.py           # Main engine: WebSocket, Hard Lock, FastAPI (:8081)
+│   ├── intelligence.py    # IntelligenceLayer: XGB + Memory + Qwen validation
+│   ├── qwen_agent.py      # Qwen Cloud DashScope signal validator
+│   ├── memory_agent.py    # Trade history context for Qwen prompts
+│   ├── formulas.py        # Multi-factor metrics (EGM, ILD, ROL, PIO, OGM)
+│   ├── parameters.py      # Centralized thresholds and config
+│   ├── models.py          # SQLite ORM (trades, active_positions, market data)
+│   ├── settings.py        # Environment configuration
+│   └── utils.py           # TP/SL, results persistence, helpers
+├── monitor_agent.py       # Observability agent (:8090) — health, alerts, audit
+├── docs/
+│   ├── qwen-integration.md    # Alibaba Cloud deployment proof
+│   ├── architecture-diagram.md  # Mermaid diagrams for judges
+│   └── devpost-submission.md    # Hackathon submission copy
+├── agents/plan.md         # Hard Lock + Qwen integration spec
+├── mcps/                  # MCP tool descriptors (Bybit, Playwright, QuestDB)
+├── data/                  # SQLite database (gitignored)
+├── logs/                  # Trade results event stream (gitignored)
+├── .env.example
+├── requirements.txt
+└── LICENSE
 ```
 
 ## Getting Started
