@@ -1,0 +1,30 @@
+name: preprod-architecture-gate
+
+on:
+  push:
+    branches:
+      - "preprod/**"
+  pull_request:
+    branches:
+      - "main"
+
+jobs:
+  architecture-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python sources
+        run: |
+          python -m compileall -q scripts monitor_agent.py run_tsm_pipeline.py
+
+      - name: Confirm operator documentation inputs
+        run: |
+          test -f README.md
+          test -f .env.example
+          test -f PREPROD_SOURCE_CONTRACT.md
