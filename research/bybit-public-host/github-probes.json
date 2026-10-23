@@ -1,0 +1,29 @@
+{
+  "http_hosts": [
+    "www.bybit.com",
+    "api.bybit.com"
+  ],
+  "ws_hosts": [
+    "stream.bybit.com"
+  ],
+  "http": [
+    "https://api.bybit.com/v5/market/time",
+    "https://api.bybit.com/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=50",
+    "https://www.bybit.com/trade/usdt/BTCUSDT"
+  ],
+  "ws": [
+    {
+      "url": "wss://stream.bybit.com/v5/public/linear",
+      "subscribe": {
+        "op": "subscribe",
+        "args": [
+          "orderbook.50.BTCUSDT",
+          "publicTrade.BTCUSDT",
+          "tickers.BTCUSDT"
+        ]
+      },
+      "seconds": 6,
+      "max_frames": 20
+    }
+  ]
+}
